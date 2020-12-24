@@ -1,61 +1,47 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using Newtonsoft.Json.Linq;
+using System.Runtime.Serialization;
+using UnityEngine.Scripting;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+[Preserve]
+[Serializable]
 public class MessageHandler
 {
     public int id;
     public string seq;
+    public string name;
+    public string data;
 
-    public String name;
-    private JToken data;
+    public static MessageHandler Deserialize(string message) =>
+        JsonUtility.FromJson<MessageHandler>(message);
 
-    public static MessageHandler Deserialize(string message)
-    {
-        JObject m = JObject.Parse(message);
-        MessageHandler handler = new MessageHandler(
-            m.GetValue("id").Value<int>(),
-            m.GetValue("seq").Value<string>(),
-            m.GetValue("name").Value<string>(),
-            m.GetValue("data")
-        );
-        return handler;
-    }
-
-    public T getData<T>()
-    {
-        return data.Value<T>();
-    }
-
-    public MessageHandler(int id, string seq, string name, JToken data)
-    {
-        this.id = id;
-        this.seq = seq;
-        this.name = name;
-        this.data = data;
-    }
-
-    public void send(object data)
-    {
-        JObject o = JObject.FromObject(new
-        {
-            id = id,
-            seq = "end",
-            name = name,
-            data = data
-        });
-        UnityMessageManager.Instance.SendMessageToFlutter(UnityMessageManager.MessagePrefix + o.ToString());
-    }
+    // ReSharper disable once InconsistentNaming
+    public T getData<T>() => string.IsNullOrEmpty(data)
+        ? default(T)
+        : JsonUtility.FromJson<T>(data);
+    // ReSharper disable once InconsistentNaming
+    public void send(object value) =>
+        UnityMessageManager.Instance.SendMessageToFlutter(
+            UnityMessageManager.MessagePrefix +
+            JsonUtility.ToJson(new MessageHandler
+            {
+                id = id,
+                name = name,
+                seq = "end",
+                data = JsonUtility.ToJson(value)
+            }));
 }
 
+[Preserve]
+[Serializable]
 public class UnityMessage
 {
-    public String name;
-    public JObject data;
-    public Action<object> callBack;
+    public string name;
+    public string data;
+    [IgnoreDataMember] public Action<object> callBack;
 }
 
 #if UNITY_IOS || UNITY_TVOS
@@ -88,16 +74,15 @@ public class UnityMessageManager : MonoBehaviour
     #endif */
 
     public const string MessagePrefix = "@UnityMessage@";
-
     private static int ID = 0;
 
     private static int generateId()
     {
-        ID = ID + 1;
+        ID += 1;
         return ID;
     }
 
-    public static UnityMessageManager Instance { get; private set; }
+    public static UnityMessageManager Instance { get; }
 
     public delegate void MessageDelegate(string message);
     public event MessageDelegate OnMessage;
@@ -105,7 +90,7 @@ public class UnityMessageManager : MonoBehaviour
     public delegate void MessageHandlerDelegate(MessageHandler handler);
     public event MessageHandlerDelegate OnFlutterMessage;
 
-    private Dictionary<int, UnityMessage> waitCallbackMessageMap = new Dictionary<int, UnityMessage>();
+    private readonly Dictionary<int, UnityMessage> _waitCallbackMessageMap = new Dictionary<int, UnityMessage>();
 
     static UnityMessageManager()
     {
@@ -114,16 +99,15 @@ public class UnityMessageManager : MonoBehaviour
         Instance = go.AddComponent<UnityMessageManager>();
     }
 
-    void Awake()
+    private void Awake()
     {
     }
-
     private void Start()
     {
         SceneManager.sceneLoaded += OnSceneLoaded;
     }
 
-    void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
         Debug.Log(scene);
 #if UNITY_ANDROID
@@ -158,7 +142,6 @@ public class UnityMessageManager : MonoBehaviour
         // NativeAPI.showHostMainWindow();
 #endif
     }
-
     public void UnloadMainWindow()
     {
 #if UNITY_ANDROID
@@ -176,8 +159,6 @@ public class UnityMessageManager : MonoBehaviour
         // NativeAPI.unloadPlayer();
 #endif
     }
-
-
     public void QuitUnityWindow()
     {
 #if UNITY_ANDROID
@@ -195,8 +176,6 @@ public class UnityMessageManager : MonoBehaviour
         // NativeAPI.quitPlayer();
 #endif
     }
-
-
     public void SendMessageToFlutter(string message)
     {
         #if UNITY_ANDROID
@@ -213,63 +192,44 @@ public class UnityMessageManager : MonoBehaviour
             NativeAPI.onUnityMessage(message);
         #endif
     }
-
     public void SendMessageToFlutter(UnityMessage message)
     {
         int id = generateId();
         if (message.callBack != null)
-        {
-            waitCallbackMessageMap.Add(id, message);
-        }
+            _waitCallbackMessageMap.Add(id, message);
 
-        JObject o = JObject.FromObject(new
-        {
-            id = id,
-            seq = message.callBack != null ? "start" : "",
-            name = message.name,
-            data = message.data
-        });
-        UnityMessageManager.Instance.SendMessageToFlutter(MessagePrefix + o.ToString());
+        SendMessageToFlutter(
+            MessagePrefix +
+            JsonUtility.ToJson(new MessageHandler
+            {
+                id = id,
+                seq = message.callBack != null ? "start" : string.Empty,
+                name = message.name,
+                data = message.data
+            }));
     }
 
-    void onMessage(string message)
+    private void onMessage(string message)
     {
-        if (OnMessage != null)
-        {
-            OnMessage(message);
-        }
+        OnMessage?.Invoke(message);
     }
-
-    void onFlutterMessage(string message)
+    private void onFlutterMessage(string message)
     {
-        if (message.StartsWith(MessagePrefix))
-        {
-            message = message.Replace(MessagePrefix, "");
-        }
-        else
-        {
+        if (!message.StartsWith(MessagePrefix))
             return;
-        }
+        message = message.Replace(MessagePrefix, "");
 
-        MessageHandler handler = MessageHandler.Deserialize(message);
+        var handler = MessageHandler.Deserialize(message);
         if ("end".Equals(handler.seq))
         {
             // handle callback message
-            UnityMessage m;
-            if (waitCallbackMessageMap.TryGetValue(handler.id, out m))
+            if (_waitCallbackMessageMap.TryGetValue(handler.id, out var m))
             {
-                waitCallbackMessageMap.Remove(handler.id);
-                if (m.callBack != null)
-                {
-                    m.callBack(handler.getData<object>()); // todo
-                }
+                _waitCallbackMessageMap.Remove(handler.id);
+                m.callBack?.Invoke(handler.getData<object>()); // todo
             }
             return;
         }
-
-        if (OnFlutterMessage != null)
-        {
-            OnFlutterMessage(handler);
-        }
+        OnFlutterMessage?.Invoke(handler);
     }
 }
